@@ -1,0 +1,4 @@
+allowBuilds:
+  lmdb: set this to true or false
+  msgpackr-extract: set this to true or false
+  zapo-js: set this to true or false
