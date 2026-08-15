@@ -4,11 +4,11 @@ Un backend de almacenamiento persistente basado en LMDB (Lightning Memory-Mapped
 
 ## ¿Qué es?
 
-Es un adaptador de base de datos que permite a `zapo-js` guardar toda su información criptográfica (llaves de sesión, tokens de privacidad, estado de la aplicación, etc.) directamente en el disco duro utilizando LMDB en lugar de almacenarlo en la memoria RAM.
+Es un adaptador de base de datos que permite a `zapo-js` guardar toda su información criptográfica (llaves de sesión, tokens de privacidad, estado de la aplicación, etc.) en LMDB, evitando mantener el estado completo como objetos JavaScript residentes en el heap de Node.js.
 
 ## ¿Para qué sirve?
 
-Sirve para mantener sesiones de WhatsApp activas a largo plazo sin consumir la memoria RAM del sistema. Al usar LMDB, la información se mapea en memoria de forma nativa, permitiendo lecturas extremadamente rápidas con un uso de recursos mínimo, lo que es ideal para bots en producción, servidores con memoria limitada o instancias que manejan múltiples sesiones simultáneas.
+Sirve para mantener sesiones de WhatsApp activas a largo plazo sin mantener el estado criptográfico como objetos JavaScript en el heap de Node.js. LMDB utiliza memory-mapping y el page cache del sistema operativo para las lecturas; esto no elimina el uso de RAM, pero sí evita la presión sobre el garbage collector y permite que el sistema operativo gestione la memoria de forma más eficiente. Ideal para bots en producción o instancias que manejan múltiples sesiones simultáneas.
 
 Admite los 8 dominios criptográficos requeridos por `zapo-js`: Auth, Signal, PreKey, Session, Identity, SenderKey, AppState y PrivacyToken.
 
@@ -71,6 +71,24 @@ La función `createLmdbStore(options)` acepta los siguientes parámetros opciona
 | `maxReaders` | `number`  | `126`         | Número máximo de lectores concurrentes permitidos por LMDB.                                                                                                                       |
 | `mapSize`    | `number`  | `2147483648`  | Tamaño máximo de la base de datos en bytes (2GB por defecto). El archivo crecerá dinámicamente hasta este límite.                                                                 |
 | `noSync`     | `boolean` | `false`       | Si se establece en `true`, omite el vaciado sincrónico al disco, lo cual acelera las escrituras pero conlleva riesgo de corrupción si el sistema operativo falla inesperadamente. |
+| `noMetaSync` | `boolean` | `true`        | Omite la sincronización de la página de metadatos de LMDB. Reduce las escrituras al disco pero, combinado con `noSync: false`, la base de datos sigue siendo recuperable ante fallos del proceso (no del sistema operativo). |
+
+## Ciclo de vida de sesiones
+
+Cuando una sesión ya no se necesita, puedes liberar las referencias internas del backend para evitar retener objetos en memoria:
+
+```javascript
+// Liberar una sesión específica
+lmdbBackend.releaseSession("mi-sesion");
+
+// Liberar todas las sesiones (útil antes de destruir el backend)
+lmdbBackend.releaseAllSessions();
+
+// Destruir el backend completamente (cierra LMDB y libera todas las sesiones)
+lmdbBackend.destroy();
+```
+
+> **Nota:** `releaseSession()` solo libera las referencias internas del caché de instancias. Los datos en LMDB no se eliminan; para eso, usa el método `clear()` de cada store antes de liberar la sesión.
 
 ## Licencia
 

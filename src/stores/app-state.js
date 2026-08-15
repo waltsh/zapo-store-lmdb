@@ -23,6 +23,7 @@ export class LmdbAppStateStore {
     this.keyRangeEnd = "appKey:" + sessionId + ":\xff";
     this.colPrefix = "appCol:" + sessionId + ":";
     this.colRangeEnd = "appCol:" + sessionId + ":\xff";
+    this.activeKeyRef = "appActiveKey:" + sessionId;
   }
 
   _kK(idHex) {
@@ -34,16 +35,63 @@ export class LmdbAppStateStore {
   }
 
   async exportData() {
-    return { keys: [], collections: {} };
+    const keys = [];
+    for (const { value } of this.db.getRange({ start: this.keyPrefix, end: this.keyRangeEnd })) {
+      keys.push(value);
+    }
+    const collections = {};
+    for (const { key, value } of this.db.getRange({ start: this.colPrefix, end: this.colRangeEnd })) {
+      if (value.initialized === true) {
+        const colName = String(key).slice(this.colPrefix.length);
+        collections[colName] = {
+          version: value.version,
+          hash: value.hash,
+          indexValueMap: value.indexValueMap || {}
+        };
+      }
+    }
+    return { keys, collections };
   }
 
   async upsertSyncKeys(keys) {
     let inserted = 0;
     await this.db.transaction(() => {
+      let activeHex = this.db.get(this.activeKeyRef);
+      let activeKey = activeHex ? this.db.get(this._kK(activeHex)) : null;
+      let activeEpoch = activeKey ? keyEpoch(activeKey.keyId) : -2;
+      let activeDeviceId = activeKey ? keyDeviceId(activeKey.keyId) : null;
+      let activeChanged = false;
+
       for (let i = 0, len = keys.length; i < len; i++) {
         const k = keys[i];
-        this.db.putSync(this._kK(toHex(k.keyId)), k);
+        const hex = toHex(k.keyId);
+        this.db.putSync(this._kK(hex), k);
         inserted++;
+
+        const nextEpoch = keyEpoch(k.keyId);
+        let isBetter = false;
+        if (activeKey === null) {
+          isBetter = true;
+        } else if (nextEpoch > activeEpoch) {
+          isBetter = true;
+        } else if (nextEpoch === activeEpoch) {
+          const nextDeviceId = keyDeviceId(k.keyId);
+          if (nextDeviceId !== null && activeDeviceId !== null && nextDeviceId < activeDeviceId) {
+            isBetter = true;
+          }
+        }
+
+        if (isBetter) {
+          activeKey = k;
+          activeHex = hex;
+          activeEpoch = nextEpoch;
+          activeDeviceId = keyDeviceId(k.keyId);
+          activeChanged = true;
+        }
+      }
+
+      if (activeChanged) {
+        this.db.putSync(this.activeKeyRef, activeHex);
       }
     });
     return inserted;
@@ -74,14 +122,25 @@ export class LmdbAppStateStore {
   }
 
   async getActiveSyncKey() {
+    const cachedHex = this.db.get(this.activeKeyRef);
+    if (cachedHex) {
+      const key = this.db.get(this._kK(cachedHex));
+      if (key !== undefined) {
+        return key;
+      }
+    }
+
     let active = null;
+    let activeHex = null;
     let activeEpoch = -2;
     let activeDeviceId = null;
 
-    for (const { value } of this.db.getRange({ start: this.keyPrefix, end: this.keyRangeEnd })) {
+    for (const { key: rawKey, value } of this.db.getRange({ start: this.keyPrefix, end: this.keyRangeEnd })) {
       const key = value;
+      const hex = String(rawKey).substring(this.keyPrefix.length);
       if (active === null) {
         active = key;
+        activeHex = hex;
         activeEpoch = keyEpoch(key.keyId);
         activeDeviceId = keyDeviceId(key.keyId);
         continue;
@@ -89,6 +148,7 @@ export class LmdbAppStateStore {
       const nextEpoch = keyEpoch(key.keyId);
       if (nextEpoch > activeEpoch) {
         active = key;
+        activeHex = hex;
         activeEpoch = nextEpoch;
         activeDeviceId = keyDeviceId(key.keyId);
         continue;
@@ -97,9 +157,14 @@ export class LmdbAppStateStore {
       const nextDeviceId = keyDeviceId(key.keyId);
       if (nextDeviceId !== null && activeDeviceId !== null && nextDeviceId < activeDeviceId) {
         active = key;
+        activeHex = hex;
         activeEpoch = nextEpoch;
         activeDeviceId = nextDeviceId;
       }
+    }
+
+    if (activeHex !== null) {
+      await this.db.put(this.activeKeyRef, activeHex);
     }
     return active;
   }
@@ -166,6 +231,7 @@ export class LmdbAppStateStore {
       for (const key of this.db.getRange({ start: this.colPrefix, end: this.colRangeEnd, values: false })) {
         this.db.removeSync(key);
       }
+      this.db.removeSync(this.activeKeyRef);
     });
   }
 }

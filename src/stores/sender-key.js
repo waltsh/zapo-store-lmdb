@@ -8,6 +8,11 @@ export class LmdbSenderKeyStore {
     this.sId = sessionId;
     this.skPrefix = "sk:" + sessionId + ":";
     this.skdPrefix = "skd:" + sessionId + ":";
+    this.idxPrefix = "skIdx:" + sessionId + ":";
+  }
+
+  _idx(addr, groupId) {
+    return this.idxPrefix + addressKey(addr) + ":" + groupId;
   }
 
   _sk(groupId, addr) {
@@ -19,7 +24,10 @@ export class LmdbSenderKeyStore {
   }
 
   async upsertSenderKey(r) {
-    await this.db.put(this._sk(r.groupId, r.sender), r);
+    await this.db.transaction(() => {
+      this.db.putSync(this._sk(r.groupId, r.sender), r);
+      this.db.putSync(this._idx(r.sender, r.groupId), 1);
+    });
   }
 
   async upsertSenderKeyDistribution(r) {
@@ -69,21 +77,25 @@ export class LmdbSenderKeyStore {
 
   async deleteDeviceSenderKey(target, groupId = "") {
     let count = 0;
-    const targetKey = addressKey(target);
     if (groupId) {
       const key = this._sk(groupId, target);
       if (this.db.doesExist(key)) {
-        await this.db.remove(key);
+        await this.db.transaction(() => {
+          this.db.removeSync(key);
+          this.db.removeSync(this._idx(target, groupId));
+        });
         count = 1;
       }
     } else {
+      const targetAddr = addressKey(target);
+      const idxStart = this.idxPrefix + targetAddr + ":";
+      const idxEnd = this.idxPrefix + targetAddr + ":\xff";
       await this.db.transaction(() => {
-        const suffix = ":" + targetKey;
-        for (const key of this.db.getRange({ start: this.skPrefix, end: this.skPrefix.slice(0, -1) + "\xff", values: false })) {
-          if (String(key).endsWith(suffix)) {
-            this.db.removeSync(key);
-            count++;
-          }
+        for (const idxKey of this.db.getRange({ start: idxStart, end: idxEnd, values: false })) {
+          const gId = String(idxKey).slice(idxStart.length);
+          this.db.removeSync(this._sk(gId, target));
+          this.db.removeSync(idxKey);
+          count++;
         }
       });
     }
@@ -107,11 +119,15 @@ export class LmdbSenderKeyStore {
   async clear() {
     const skEnd = this.skPrefix.slice(0, -1) + "\xff";
     const skdEnd = this.skdPrefix.slice(0, -1) + "\xff";
+    const idxEnd = this.idxPrefix.slice(0, -1) + "\xff";
     await this.db.transaction(() => {
       for (const key of this.db.getRange({ start: this.skPrefix, end: skEnd, values: false })) {
         this.db.removeSync(key);
       }
       for (const key of this.db.getRange({ start: this.skdPrefix, end: skdEnd, values: false })) {
+        this.db.removeSync(key);
+      }
+      for (const key of this.db.getRange({ start: this.idxPrefix, end: idxEnd, values: false })) {
         this.db.removeSync(key);
       }
     });

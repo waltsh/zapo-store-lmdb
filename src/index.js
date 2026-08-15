@@ -8,14 +8,20 @@ import { LmdbSenderKeyStore } from "./stores/sender-key.js";
 import { LmdbAppStateStore } from "./stores/app-state.js";
 import { LmdbPrivacyTokenStore } from "./stores/privacy-token.js";
 
-export function createLmdbStore({ path, maxReaders = 126, mapSize = 2147483648, noSync = false }) {
+export function createLmdbStore({
+  path,
+  maxReaders = 126,
+  mapSize = 2147483648,
+  noSync = false,
+  compression = false,
+}) {
   const db = open({
     path,
     maxReaders,
     mapSize,
     noSync,
     noMetaSync: true,
-    compression: true,
+    compression,
     commitDelay: 0,
   });
 
@@ -31,6 +37,8 @@ export function createLmdbStore({ path, maxReaders = 126, mapSize = 2147483648, 
     return store;
   }
 
+  const PREFIXES = ["a", "s", "p", "e", "i", "k", "t", "v"];
+
   return {
     stores: {
       auth: (sessionId) => getOrCreate("a", sessionId, LmdbAuthStore),
@@ -43,6 +51,17 @@ export function createLmdbStore({ path, maxReaders = 126, mapSize = 2147483648, 
       privacyToken: (sessionId) => getOrCreate("v", sessionId, LmdbPrivacyTokenStore),
     },
     caches: {},
-    destroy: () => db.close(),
+    releaseSession(sessionId) {
+      for (let i = 0; i < PREFIXES.length; i++) {
+        storeCache.delete(PREFIXES[i] + sessionId);
+      }
+    },
+    releaseAllSessions() {
+      storeCache.clear();
+    },
+    destroy: () => {
+      storeCache.clear();
+      db.close();
+    },
   };
 }

@@ -11,15 +11,26 @@ export class LmdbPreKeyStore {
   }
 
   _getState() {
-    return this.db.get(this.stateKey) ?? { nextId: 1, uploaded: [], serverHas: false };
+    const state = this.db.get(this.stateKey);
+    if (state === undefined) return { nextId: 1, uploadedUntil: 0, serverHas: false };
+    // Migrate old format: uploaded[] → uploadedUntil
+    if (state.uploadedUntil === undefined) {
+      const uploaded = state.uploaded;
+      let max = 0;
+      if (uploaded) {
+        for (let i = 0, len = uploaded.length; i < len; i++) {
+          if (uploaded[i] > max) max = uploaded[i];
+        }
+      }
+      state.uploadedUntil = max;
+      delete state.uploaded;
+    }
+    return state;
   }
 
   async putPreKey(record) {
     const state = this._getState();
     const id = record.keyId;
-    const uploaded = state.uploaded;
-    const idx = uploaded.indexOf(id);
-    if (idx !== -1) uploaded.splice(idx, 1);
     if (id >= state.nextId) state.nextId = id + 1;
     await this.db.transaction(() => {
       this.db.putSync(this._k(id), record);
@@ -29,13 +40,12 @@ export class LmdbPreKeyStore {
 
   async getOrGenPreKeys(count, generator) {
     const state = this._getState();
-    const uploaded = state.uploaded;
-    const uploadedSet = new Set(uploaded);
+    const uploadedUntil = state.uploadedUntil;
     const available = [];
 
     for (const { key, value } of this.db.getRange({ start: this.prefix, end: this.rangeEnd })) {
       const id = parseInt(String(key).slice(this.prefix.length), 10);
-      if (!uploadedSet.has(id) && value !== undefined) {
+      if (id > uploadedUntil && value !== undefined) {
         available.push(value);
         if (available.length >= count) return available;
       }
@@ -78,14 +88,7 @@ export class LmdbPreKeyStore {
   async consumePreKeyById(id) {
     const record = this.db.get(this._k(id));
     if (record !== undefined) {
-      const state = this._getState();
-      const uploaded = state.uploaded;
-      const idx = uploaded.indexOf(id);
-      if (idx !== -1) uploaded.splice(idx, 1);
-      await this.db.transaction(() => {
-        this.db.removeSync(this._k(id));
-        this.db.putSync(this.stateKey, state);
-      });
+      await this.db.remove(this._k(id));
       return record;
     }
     return null;
@@ -97,15 +100,10 @@ export class LmdbPreKeyStore {
 
   async markKeyAsUploaded(id) {
     const state = this._getState();
-    const uploadedSet = new Set(state.uploaded);
-    for (const key of this.db.getRange({ start: this.prefix, end: this.rangeEnd, values: false })) {
-      const cid = parseInt(String(key).slice(this.prefix.length), 10);
-      if (cid <= id && !uploadedSet.has(cid)) {
-        uploadedSet.add(cid);
-      }
+    if (id > state.uploadedUntil) {
+      state.uploadedUntil = id;
+      await this.db.put(this.stateKey, state);
     }
-    state.uploaded = Array.from(uploadedSet);
-    await this.db.put(this.stateKey, state);
   }
 
   async setServerHasPreKeys(val) {
